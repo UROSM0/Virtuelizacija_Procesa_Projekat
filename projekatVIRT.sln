@@ -1,0 +1,53 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34723.18
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Client", "projekatVIRT\Client.csproj", "{C0CBA3D4-C36D-4830-9CE8-0403B53643B1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Service", "Server\Service.csproj", "{D2559DC9-AEC0-41D1-8DD5-FC3E18581C19}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Common", "Common\Common.csproj", "{D42A9A05-C275-428B-AB5E-7B8457581ABF}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "vehicles", "vehicles", "{470B1AE3-630B-409B-ABC7-80F80F14DBC1}"
+	ProjectSection(SolutionItems) = preProject
+		vehicles\vozilo1\BMW iX xDrive50.csv = vehicles\vozilo1\BMW iX xDrive50.csv
+		vehicles\vozilo2\Ford Mustang.csv = vehicles\vozilo2\Ford Mustang.csv
+		vehicles\vozilo3\Hyundai Ioniq 5.csv = vehicles\vozilo3\Hyundai Ioniq 5.csv
+		vehicles\vozilo4\Hyundai Ioniq Electric.csv = vehicles\vozilo4\Hyundai Ioniq Electric.csv
+		vehicles\vozilo5\Kia Nero.csv = vehicles\vozilo5\Kia Nero.csv
+		vehicles\vozilo6\Lexus.csv = vehicles\vozilo6\Lexus.csv
+		vehicles\vozilo7\Mitsubishi Outlander.csv = vehicles\vozilo7\Mitsubishi Outlander.csv
+		vehicles\vozilo8\Nissan Leaf.csv = vehicles\vozilo8\Nissan Leaf.csv
+		vehicles\vozilo9\Tesla Model 3.csv = vehicles\vozilo9\Tesla Model 3.csv
+		vehicles\vozilo10\Tesla Model Y.csv = vehicles\vozilo10\Tesla Model Y.csv
+		vehicles\vozilo11\Toyota Prius Prime 2021.csv = vehicles\vozilo11\Toyota Prius Prime 2021.csv
+		vehicles\vozilo12\Volvo XC 40.csv = vehicles\vozilo12\Volvo XC 40.csv
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C0CBA3D4-C36D-4830-9CE8-0403B53643B1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C0CBA3D4-C36D-4830-9CE8-0403B53643B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C0CBA3D4-C36D-4830-9CE8-0403B53643B1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C0CBA3D4-C36D-4830-9CE8-0403B53643B1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D2559DC9-AEC0-41D1-8DD5-FC3E18581C19}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D2559DC9-AEC0-41D1-8DD5-FC3E18581C19}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D2559DC9-AEC0-41D1-8DD5-FC3E18581C19}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D2559DC9-AEC0-41D1-8DD5-FC3E18581C19}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D42A9A05-C275-428B-AB5E-7B8457581ABF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D42A9A05-C275-428B-AB5E-7B8457581ABF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D42A9A05-C275-428B-AB5E-7B8457581ABF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D42A9A05-C275-428B-AB5E-7B8457581ABF}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E60CF4E0-CAED-4E53-9C56-A49207F58FE9}
+	EndGlobalSection
+EndGlobal
