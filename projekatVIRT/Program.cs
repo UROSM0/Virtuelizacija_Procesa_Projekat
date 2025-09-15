@@ -12,7 +12,6 @@ namespace Client
         static void Main(string[] args)
         {
             var vehiclesRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "vehicles");
-
             if (!Directory.Exists(vehiclesRoot))
             {
                 Console.WriteLine($"[ERR] Ne postoji folder: {vehiclesRoot}");
@@ -24,7 +23,6 @@ namespace Client
                                           || p.EndsWith(".tab", StringComparison.OrdinalIgnoreCase))
                                  .OrderBy(Path.GetFileName)
                                  .ToList();
-
             if (files.Count == 0)
             {
                 Console.WriteLine("[ERR] Nije pronađen nijedan .csv/.tab fajl u 'vehicles'.");
@@ -34,7 +32,6 @@ namespace Client
             Console.WriteLine("=== Izaberite vozilo (CSV fajl) ===");
             for (int i = 0; i < files.Count; i++)
                 Console.WriteLine($"{i + 1}. {Path.GetFileName(files[i])}");
-
             Console.Write("Unesite broj: ");
             if (!int.TryParse(Console.ReadLine(), out int choice) || choice < 1 || choice > files.Count)
             {
@@ -53,8 +50,10 @@ namespace Client
 
             try
             {
-                proxy.StartSession(vehicleId);
-                Console.WriteLine($"[OK] StartSession: {vehicleId}");
+                // StartSession (ne ruši app čak i ako server vrati Fault)
+                SafeCall(() => proxy.StartSession(vehicleId),
+                         onFault: reason => Console.WriteLine($"[ERR] StartSession fault: {reason}"),
+                         onOk: () => Console.WriteLine($"[OK] StartSession: {vehicleId}"));
 
                 var culture = CultureInfo.InvariantCulture;
                 int row = 0;
@@ -64,10 +63,10 @@ namespace Client
                 {
                     string firstLine = sr.ReadLine();
                     if (firstLine == null) throw new InvalidOperationException("CSV je prazan.");
+
                     string delim = GuessDelimiter(firstLine);
                     string[] cols = SplitLine(firstLine, delim);
 
-                    // Ako header – preskoči
                     if (!HeaderLooksLikeData(cols))
                     {
                         Console.WriteLine("[INFO] Header prepoznat i preskočen.");
@@ -75,38 +74,24 @@ namespace Client
                     else
                     {
                         row++;
-                        try
-                        {
-                            var s0 = ParseSample(cols, row, vehicleId, culture);
-                            proxy.PushSample(s0);
-                            Console.WriteLine($"[SEND] row={row}");
-                        }
-                        catch (Exception ex)
-                        {
-                            LogReject(rejectsPath, row, firstLine, ex.Message);
-                        }
+                        TrySendRow(proxy, rejectsPath, row, firstLine, cols, vehicleId, culture);
                     }
 
                     string line;
                     while ((line = sr.ReadLine()) != null)
                     {
                         row++;
-                        try
-                        {
-                            var parts = SplitLine(line, delim);
-                            var s = ParseSample(parts, row, vehicleId, culture);
-                            proxy.PushSample(s);
-                            if (row % 100 == 0) Console.WriteLine($"[SEND] row={row}");
-                        }
-                        catch (Exception ex)
-                        {
-                            LogReject(rejectsPath, row, line, ex.Message);
-                        }
+                        var parts = SplitLine(line, delim);
+                        TrySendRow(proxy, rejectsPath, row, line, parts, vehicleId, culture);
+
+                        if (row % 100 == 0) Console.WriteLine($"[SEND] row={row}");
                     }
                 }
 
-                proxy.EndSession(vehicleId);
-                Console.WriteLine("[OK] EndSession");
+                // EndSession
+                SafeCall(() => proxy.EndSession(vehicleId),
+                         onFault: reason => Console.WriteLine($"[ERR] EndSession fault: {reason}"),
+                         onOk: () => Console.WriteLine("[OK] EndSession"));
             }
             finally
             {
@@ -116,6 +101,55 @@ namespace Client
 
             Console.WriteLine("Gotovo. Enter za izlaz.");
             Console.ReadLine();
+        }
+
+        // ----- helpers -----
+
+        static void TrySendRow(IChargingService proxy, string rejectsPath, int row, string rawLine, string[] parts, string vehicleId, CultureInfo culture)
+        {
+            try
+            {
+                var s = ParseSample(parts, row, vehicleId, culture);
+                proxy.PushSample(s);
+            }
+            catch (FaultException<FaultInfo> fe) // typed fault
+            {
+                var reason = fe.Detail?.Reason ?? fe.Message;
+                LogReject(rejectsPath, row, rawLine, $"SERVER_FAULT_TYPED: {reason}");
+            }
+            catch (FaultException fe) // untyped fault (safety-net)
+            {
+                LogReject(rejectsPath, row, rawLine, $"SERVER_FAULT_UNTYPED: {fe.Message}");
+            }
+            catch (CommunicationException ce)
+            {
+                LogReject(rejectsPath, row, rawLine, $"COMM_ERROR: {ce.Message}");
+            }
+            catch (TimeoutException te)
+            {
+                LogReject(rejectsPath, row, rawLine, $"TIMEOUT: {te.Message}");
+            }
+            catch (Exception ex) // lokalni parse ili bilo šta
+            {
+                LogReject(rejectsPath, row, rawLine, ex.Message);
+            }
+        }
+
+        static void SafeCall(Action call, Action onOk = null, Action<string> onFault = null)
+        {
+            try
+            {
+                call();
+                onOk?.Invoke();
+            }
+            catch (FaultException<FaultInfo> fe)
+            {
+                onFault?.Invoke(fe.Detail?.Reason ?? fe.Message);
+            }
+            catch (FaultException fe)
+            {
+                onFault?.Invoke(fe.Message);
+            }
         }
 
         static string GuessDelimiter(string firstLine)
@@ -129,9 +163,7 @@ namespace Client
             => line.Split(new[] { delim }, StringSplitOptions.None);
 
         static bool HeaderLooksLikeData(string[] cols)
-        {
-            return DateTime.TryParse(cols[0], CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out _);
-        }
+            => DateTime.TryParse(cols[0], CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out _);
 
         static ChargingSample ParseSample(string[] t, int row, string vehicleId, CultureInfo culture)
         {
