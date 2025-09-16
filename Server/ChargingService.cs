@@ -61,7 +61,7 @@ namespace Service
             }
 
             Console.WriteLine($"[SERVER] StartSession: {_vehicleId}");
-            Console.WriteLine("[SERVER] Status: prenos u toku...");                 // #7
+            Console.WriteLine("[SERVER] Status: prenos u toku...");                 
         }
 
         public void PushSample(ChargingSample s)
@@ -98,7 +98,7 @@ namespace Service
             _sessionWriter.WriteLine(line);
             _acceptedRows.Add(s.RowIndex);
 
-            if (s.RowIndex % 100 == 0)                                       // #7 (progres)
+            if (s.RowIndex % 100 == 0)                                     
                 Console.WriteLine($"[SERVER] primljeno {s.RowIndex} redova...");
         }
 
@@ -109,7 +109,7 @@ namespace Service
                 throw Fault("VehicleId mismatch.");
 
             Console.WriteLine($"[SERVER] EndSession: {vehicleId}");
-            Console.WriteLine("[SERVER] Status: prenos završen.");            // #7
+            Console.WriteLine("[SERVER] Status: prenos završen.");          
             _active = false;
             CloseSessionWriters();
         }
