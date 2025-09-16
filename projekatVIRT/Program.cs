@@ -49,10 +49,8 @@ namespace Client
             string rejectsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rejects.csv");
             if (File.Exists(rejectsPath)) File.Delete(rejectsPath);
 
-           
             using (var svc = new ChargingServiceClient("ChargingEndpoint"))
             {
-                
                 svc.SafeCall(() => svc.Proxy.StartSession(vehicleId),
                              onFault: reason => Console.WriteLine($"[ERR] StartSession fault: {reason}"),
                              onOk: () => Console.WriteLine($"[OK] StartSession: {vehicleId}"));
@@ -71,6 +69,7 @@ namespace Client
                         string delim = GuessDelimiter(firstLine);
                         string[] cols = SplitLine(firstLine, delim);
 
+                        
                         if (!HeaderLooksLikeData(cols))
                         {
                             Console.WriteLine("[INFO] Header prepoznat i preskočen.");
@@ -78,8 +77,13 @@ namespace Client
                         else
                         {
                             row++;
-                            TrySendRow(svc, rejectsPath, row, firstLine, cols, vehicleId, culture);
-                            if (failAfter > 0 && row >= failAfter) SimulateDrop(svc);
+                            bool ok = TrySendRow(svc, rejectsPath, row, firstLine, cols, vehicleId, culture);
+                            if (!ok) goto CLEAN_BREAK; 
+                            if (failAfter > 0 && row >= failAfter)
+                            {
+                                bool keep = SimulateDrop(svc);
+                                if (!keep) goto CLEAN_BREAK;
+                            }
                         }
 
                         string line;
@@ -87,75 +91,80 @@ namespace Client
                         {
                             row++;
                             var parts = SplitLine(line, delim);
-                            TrySendRow(svc, rejectsPath, row, line, parts, vehicleId, culture);
 
-                            if (failAfter > 0 && row >= failAfter) SimulateDrop(svc);
+                            bool ok = TrySendRow(svc, rejectsPath, row, line, parts, vehicleId, culture);
+                            if (!ok) break; 
+
+                            if (failAfter > 0 && row >= failAfter)
+                            {
+                                bool keep = SimulateDrop(svc);
+                                if (!keep) break;
+                            }
 
                             if (row % 100 == 0) Console.WriteLine($"[SEND] row={row}");
                         }
                     }
                 }
-                catch (OperationCanceledException)
-                {
-                    Console.WriteLine("[SIM] Prekid prenosa simuliran.");
-                }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[ERR] Neočekivana greška: {ex.Message}");
                 }
-                finally
-                {
-                    
-                    svc.SafeCall(() => svc.Proxy.EndSession(vehicleId),
-                                 onFault: reason => Console.WriteLine($"[ERR] EndSession fault: {reason}"),
-                                 onOk: () => Console.WriteLine("[OK] EndSession"));
-                }
+
+            CLEAN_BREAK:
+
+                svc.SafeCall(() => svc.Proxy.EndSession(vehicleId),
+                             onFault: reason => Console.WriteLine($"[ERR] EndSession fault: {reason}"),
+                             onOk: () => Console.WriteLine("[OK] EndSession"));
             }
 
             Console.WriteLine("Gotovo. Enter za izlaz.");
             Console.ReadLine();
         }
 
-     
+        // === helperi ===
 
-        static void TrySendRow(ChargingServiceClient svc, string rejectsPath, int row, string rawLine, string[] parts, string vehicleId, CultureInfo culture)
+        static bool TrySendRow(ChargingServiceClient svc, string rejectsPath, int row, string rawLine, string[] parts, string vehicleId, CultureInfo culture)
         {
             try
             {
                 var s = ParseSample(parts, row, vehicleId, culture);
                 svc.Proxy.PushSample(s);
+                return true; 
             }
             catch (FaultException<FaultInfo> fe)
             {
                 var reason = fe.Detail?.Reason ?? fe.Message;
                 LogReject(rejectsPath, row, rawLine, $"SERVER_FAULT_TYPED: {reason}");
+                return true; 
             }
             catch (FaultException fe)
             {
                 LogReject(rejectsPath, row, rawLine, $"SERVER_FAULT_UNTYPED: {fe.Message}");
+                return true; 
             }
             catch (CommunicationException ce)
             {
                 LogReject(rejectsPath, row, rawLine, $"COMM_ERROR: {ce.Message}");
-                throw; 
+                return false; 
             }
             catch (TimeoutException te)
             {
                 LogReject(rejectsPath, row, rawLine, $"TIMEOUT: {te.Message}");
-                throw;
+                return false; 
             }
             catch (Exception ex)
             {
                 LogReject(rejectsPath, row, rawLine, ex.Message);
+                return true; 
             }
         }
 
-        static void SimulateDrop(ChargingServiceClient svc)
+   
+        static bool SimulateDrop(ChargingServiceClient svc)
         {
-           
             Console.WriteLine("[SIM] Kidam vezu (Abort) – simulacija prekida prenosa.");
-            svc.Abort();
-            throw new OperationCanceledException("Simulirani prekid prenosa.");
+            svc.Abort();        
+            return false;       
         }
 
         static string GuessDelimiter(string firstLine)
@@ -211,9 +220,6 @@ namespace Client
         }
     }
 
-    /// <summary>
-    /// Disposable wrapper za WCF konekciju (ChannelFactory + kanal) – #4
-    /// </summary>
     sealed class ChargingServiceClient : IDisposable
     {
         public ChannelFactory<IChargingService> Factory { get; }
@@ -246,7 +252,6 @@ namespace Client
 
         public void Abort()
         {
-          
             try { ((IClientChannel)Proxy)?.Abort(); } catch { }
             try { Factory?.Abort(); } catch { }
         }
