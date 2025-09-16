@@ -11,7 +11,7 @@ namespace Client
     {
         static void Main(string[] args)
         {
-           
+            // --- simulacija prekida: korisnik unosi posle kog reda "kidamo" vezu (0 = bez simulacije) ---
             Console.Write("Simuliraj prekid posle N redova? (0 = ne): ");
             int.TryParse(Console.ReadLine(), out int failAfter);
 
@@ -49,8 +49,10 @@ namespace Client
             string rejectsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rejects.csv");
             if (File.Exists(rejectsPath)) File.Delete(rejectsPath);
 
+            // WCF proxy upravljamo kroz disposable wrapper
             using (var svc = new ChargingServiceClient("ChargingEndpoint"))
             {
+                // StartSession – ne ruši klijenta ni na fault
                 svc.SafeCall(() => svc.Proxy.StartSession(vehicleId),
                              onFault: reason => Console.WriteLine($"[ERR] StartSession fault: {reason}"),
                              onOk: () => Console.WriteLine($"[OK] StartSession: {vehicleId}"));
@@ -69,7 +71,6 @@ namespace Client
                         string delim = GuessDelimiter(firstLine);
                         string[] cols = SplitLine(firstLine, delim);
 
-                        
                         if (!HeaderLooksLikeData(cols))
                         {
                             Console.WriteLine("[INFO] Header prepoznat i preskočen.");
@@ -77,13 +78,8 @@ namespace Client
                         else
                         {
                             row++;
-                            bool ok = TrySendRow(svc, rejectsPath, row, firstLine, cols, vehicleId, culture);
-                            if (!ok) goto CLEAN_BREAK; 
-                            if (failAfter > 0 && row >= failAfter)
-                            {
-                                bool keep = SimulateDrop(svc);
-                                if (!keep) goto CLEAN_BREAK;
-                            }
+                            TrySendRow(svc, rejectsPath, row, firstLine, cols, vehicleId, culture);
+                            if (failAfter > 0 && row >= failAfter) SimulateDrop(svc);
                         }
 
                         string line;
@@ -91,30 +87,29 @@ namespace Client
                         {
                             row++;
                             var parts = SplitLine(line, delim);
+                            TrySendRow(svc, rejectsPath, row, line, parts, vehicleId, culture);
 
-                            bool ok = TrySendRow(svc, rejectsPath, row, line, parts, vehicleId, culture);
-                            if (!ok) break; 
-
-                            if (failAfter > 0 && row >= failAfter)
-                            {
-                                bool keep = SimulateDrop(svc);
-                                if (!keep) break;
-                            }
+                            if (failAfter > 0 && row >= failAfter) SimulateDrop(svc);
 
                             if (row % 100 == 0) Console.WriteLine($"[SEND] row={row}");
                         }
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine("[SIM] Prekid prenosa simuliran.");
+                }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[ERR] Neočekivana greška: {ex.Message}");
                 }
-
-            CLEAN_BREAK:
-
-                svc.SafeCall(() => svc.Proxy.EndSession(vehicleId),
-                             onFault: reason => Console.WriteLine($"[ERR] EndSession fault: {reason}"),
-                             onOk: () => Console.WriteLine("[OK] EndSession"));
+                finally
+                {
+                    // EndSession – pokušaj samo ako kanal još živi
+                    svc.SafeCall(() => svc.Proxy.EndSession(vehicleId),
+                                 onFault: reason => Console.WriteLine($"[ERR] EndSession fault: {reason}"),
+                                 onOk: () => Console.WriteLine("[OK] EndSession"));
+                }
             }
 
             Console.WriteLine("Gotovo. Enter za izlaz.");
@@ -123,48 +118,44 @@ namespace Client
 
         // === helperi ===
 
-        static bool TrySendRow(ChargingServiceClient svc, string rejectsPath, int row, string rawLine, string[] parts, string vehicleId, CultureInfo culture)
+        static void TrySendRow(ChargingServiceClient svc, string rejectsPath, int row, string rawLine, string[] parts, string vehicleId, CultureInfo culture)
         {
             try
             {
                 var s = ParseSample(parts, row, vehicleId, culture);
                 svc.Proxy.PushSample(s);
-                return true; 
             }
             catch (FaultException<FaultInfo> fe)
             {
                 var reason = fe.Detail?.Reason ?? fe.Message;
                 LogReject(rejectsPath, row, rawLine, $"SERVER_FAULT_TYPED: {reason}");
-                return true; 
             }
             catch (FaultException fe)
             {
                 LogReject(rejectsPath, row, rawLine, $"SERVER_FAULT_UNTYPED: {fe.Message}");
-                return true; 
             }
             catch (CommunicationException ce)
             {
                 LogReject(rejectsPath, row, rawLine, $"COMM_ERROR: {ce.Message}");
-                return false; 
+                throw; // prekini dalje slanje – veza je pukla
             }
             catch (TimeoutException te)
             {
                 LogReject(rejectsPath, row, rawLine, $"TIMEOUT: {te.Message}");
-                return false; 
+                throw;
             }
             catch (Exception ex)
             {
                 LogReject(rejectsPath, row, rawLine, ex.Message);
-                return true; 
             }
         }
 
-   
-        static bool SimulateDrop(ChargingServiceClient svc)
+        static void SimulateDrop(ChargingServiceClient svc)
         {
+            // simulacija prekida: nasilno "kidamo" kanal (Abort) i bacamo cancel
             Console.WriteLine("[SIM] Kidam vezu (Abort) – simulacija prekida prenosa.");
-            svc.Abort();        
-            return false;       
+            svc.Abort();
+            throw new OperationCanceledException("Simulirani prekid prenosa.");
         }
 
         static string GuessDelimiter(string firstLine)
@@ -220,6 +211,9 @@ namespace Client
         }
     }
 
+    /// <summary>
+    /// Disposable wrapper za WCF konekciju (ChannelFactory + kanal) – #4
+    /// </summary>
     sealed class ChargingServiceClient : IDisposable
     {
         public ChannelFactory<IChargingService> Factory { get; }
@@ -252,6 +246,7 @@ namespace Client
 
         public void Abort()
         {
+            // nasilno kidanje veze (simulacija), ne baca
             try { ((IClientChannel)Proxy)?.Abort(); } catch { }
             try { Factory?.Abort(); } catch { }
         }
@@ -261,6 +256,7 @@ namespace Client
             if (_disposed) return;
             _disposed = true;
 
+            // determinističko zatvaranje kanala/fabrike
             try
             {
                 var ch = Proxy as IClientChannel;

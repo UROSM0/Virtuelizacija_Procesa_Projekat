@@ -10,21 +10,33 @@ namespace Service
     [ServiceBehavior(InstanceContextMode = InstanceContextMode.Single)]
     public class ChargingService : IChargingService, IDisposable
     {
+        
         private bool _active;
         private string _vehicleId;
 
-        private HashSet<int> _acceptedRows = new HashSet<int>();
-        private HashSet<int> _rejectedRows = new HashSet<int>();
 
+        private readonly HashSet<int> _acceptedRows = new HashSet<int>();
+        private readonly HashSet<int> _rejectedRows = new HashSet<int>();
+
+       
         private string _sessionDir;
         private string _sessionCsvPath;
         private string _rejectsCsvPath;
 
+        
         private FileStream _sessionFs;
         private StreamWriter _sessionWriter;
 
         private FileStream _rejectsFs;
         private StreamWriter _rejectsWriter;
+
+        public event EventHandler<TransferStartedEventArgs> OnTransferStarted;
+        public event EventHandler<SampleReceivedEventArgs> OnSampleReceived;
+        public event EventHandler<TransferCompletedEventArgs> OnTransferCompleted;
+        public event EventHandler<WarningEventArgs> OnWarningRaised;
+
+        private int _acceptedCount;
+        private int _rejectedCount;
 
         public void StartSession(string vehicleId)
         {
@@ -36,6 +48,8 @@ namespace Service
 
             _acceptedRows.Clear();
             _rejectedRows.Clear();
+            _acceptedCount = 0;
+            _rejectedCount = 0;
 
             var date = DateTime.UtcNow.ToString("yyyy-MM-dd");
             _sessionDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", _vehicleId, date);
@@ -49,7 +63,14 @@ namespace Service
             _sessionWriter = new StreamWriter(_sessionFs) { AutoFlush = true };
             if (newSession)
             {
-                _sessionWriter.WriteLine("RowIndex,Timestamp,VoltMin,VoltAvg,VoltMax,CurrMin,CurrAvg,CurrMax,RealMin,RealAvg,RealMax,ReacMin,ReacAvg,ReacMax,AppMin,AppAvg,AppMax,FreqMin,FreqAvg,FreqMax,VehicleId");
+                _sessionWriter.WriteLine(
+                    "RowIndex,Timestamp,VoltMin,VoltAvg,VoltMax," +
+                    "CurrMin,CurrAvg,CurrMax," +
+                    "RealMin,RealAvg,RealMax," +
+                    "ReacMin,ReacAvg,ReacMax," +
+                    "AppMin,AppAvg,AppMax," +
+                    "FreqMin,FreqAvg,FreqMax," +
+                    "VehicleId");
             }
 
             bool newRejects = !File.Exists(_rejectsCsvPath);
@@ -61,16 +82,19 @@ namespace Service
             }
 
             Console.WriteLine($"[SERVER] StartSession: {_vehicleId}");
-            Console.WriteLine("[SERVER] Status: prenos u toku...");                 
+            Console.WriteLine("[SERVER] Status: prenos u toku..."); 
+            RaiseTransferStarted();                                  
         }
 
         public void PushSample(ChargingSample s)
         {
             EnsureActive();
 
+            
             if (s != null && s.RowIndex > 0 && _acceptedRows.Contains(s.RowIndex))
                 return;
 
+           
             if (s == null) Reject("Sample is null.", null);
             if (s.Timestamp == default) Reject("Invalid Timestamp.", s.RowIndex);
 
@@ -83,6 +107,7 @@ namespace Service
             if (!AllStrictlyPositive(s.FrequencyMin, s.FrequencyAvg, s.FrequencyMax))
                 Reject("Frequency must be > 0.", s.RowIndex);
 
+           
             string line = string.Join(",",
                 s.RowIndex,
                 s.Timestamp.ToString("o"),
@@ -97,8 +122,10 @@ namespace Service
 
             _sessionWriter.WriteLine(line);
             _acceptedRows.Add(s.RowIndex);
+            _acceptedCount++;                                   
+            RaiseSampleReceived(s.RowIndex, s.Timestamp);       
 
-            if (s.RowIndex % 100 == 0)                                     
+            if (s.RowIndex % 100 == 0)                         
                 Console.WriteLine($"[SERVER] primljeno {s.RowIndex} redova...");
         }
 
@@ -109,10 +136,14 @@ namespace Service
                 throw Fault("VehicleId mismatch.");
 
             Console.WriteLine($"[SERVER] EndSession: {vehicleId}");
-            Console.WriteLine("[SERVER] Status: prenos završen.");          
+            Console.WriteLine("[SERVER] Status: prenos završen."); 
+            RaiseTransferCompleted();                              
+
             _active = false;
             CloseSessionWriters();
         }
+
+        // --- helpers ---
 
         private static bool AllStrictlyPositive(params double[] vals) => vals.All(v => v > 0.0);
         private static bool AllNonNegative(params double[] vals) => vals.All(v => v >= 0.0);
@@ -127,8 +158,10 @@ namespace Service
             if (rowIndex.HasValue && _rejectedRows.Add(rowIndex.Value))
             {
                 _rejectsWriter?.WriteLine($"{rowIndex},{reason},{_vehicleId}");
+                _rejectedCount++;                                 
             }
-            throw Fault(reason, rowIndex);
+            RaiseWarning(reason, rowIndex);                        
+            throw Fault(reason, rowIndex);                         
         }
 
         private FaultException<FaultInfo> Fault(string reason, int? rowIndex = null)
@@ -151,6 +184,41 @@ namespace Service
             _rejectsFs = null;
         }
 
+       
+        private void RaiseTransferStarted()
+            => OnTransferStarted?.Invoke(this, new TransferStartedEventArgs
+            {
+                VehicleId = _vehicleId,
+                UtcStarted = DateTime.UtcNow
+            });
+
+        private void RaiseSampleReceived(int rowIndex, DateTime ts)
+            => OnSampleReceived?.Invoke(this, new SampleReceivedEventArgs
+            {
+                VehicleId = _vehicleId,
+                RowIndex = rowIndex,
+                Timestamp = ts
+            });
+
+        private void RaiseTransferCompleted()
+            => OnTransferCompleted?.Invoke(this, new TransferCompletedEventArgs
+            {
+                VehicleId = _vehicleId,
+                AcceptedCount = _acceptedCount,
+                RejectedCount = _rejectedCount,
+                UtcCompleted = DateTime.UtcNow
+            });
+
+        private void RaiseWarning(string reason, int? rowIndex)
+            => OnWarningRaised?.Invoke(this, new WarningEventArgs
+            {
+                VehicleId = _vehicleId,
+                RowIndex = rowIndex,
+                Reason = reason,
+                UtcRaised = DateTime.UtcNow
+            });
+
+        
         private bool _disposed;
         public void Dispose()
         {
