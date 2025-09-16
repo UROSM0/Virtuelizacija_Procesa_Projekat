@@ -10,20 +10,16 @@ namespace Service
     [ServiceBehavior(InstanceContextMode = InstanceContextMode.Single)]
     public class ChargingService : IChargingService, IDisposable
     {
-        
         private bool _active;
         private string _vehicleId;
 
-       
         private HashSet<int> _acceptedRows = new HashSet<int>();
         private HashSet<int> _rejectedRows = new HashSet<int>();
 
-        
         private string _sessionDir;
         private string _sessionCsvPath;
         private string _rejectsCsvPath;
 
-        
         private FileStream _sessionFs;
         private StreamWriter _sessionWriter;
 
@@ -65,6 +61,7 @@ namespace Service
             }
 
             Console.WriteLine($"[SERVER] StartSession: {_vehicleId}");
+            Console.WriteLine("[SERVER] Status: prenos u toku...");                 // #7
         }
 
         public void PushSample(ChargingSample s)
@@ -72,20 +69,17 @@ namespace Service
             EnsureActive();
 
             if (s != null && s.RowIndex > 0 && _acceptedRows.Contains(s.RowIndex))
-                return; 
+                return;
 
-            
             if (s == null) Reject("Sample is null.", null);
             if (s.Timestamp == default) Reject("Invalid Timestamp.", s.RowIndex);
 
             if (!AllStrictlyPositive(s.VoltageRmsMin, s.VoltageRmsAvg, s.VoltageRmsMax))
                 Reject("Voltage RMS must be > 0.", s.RowIndex);
 
-            
             if (!AllNonNegative(s.CurrentRmsMin, s.CurrentRmsAvg, s.CurrentRmsMax))
                 Reject("Current RMS must be >= 0.", s.RowIndex);
 
-          
             if (!AllStrictlyPositive(s.FrequencyMin, s.FrequencyAvg, s.FrequencyMax))
                 Reject("Frequency must be > 0.", s.RowIndex);
 
@@ -103,7 +97,9 @@ namespace Service
 
             _sessionWriter.WriteLine(line);
             _acceptedRows.Add(s.RowIndex);
-          
+
+            if (s.RowIndex % 100 == 0)                                       // #7 (progres)
+                Console.WriteLine($"[SERVER] primljeno {s.RowIndex} redova...");
         }
 
         public void EndSession(string vehicleId)
@@ -113,8 +109,9 @@ namespace Service
                 throw Fault("VehicleId mismatch.");
 
             Console.WriteLine($"[SERVER] EndSession: {vehicleId}");
+            Console.WriteLine("[SERVER] Status: prenos završen.");            // #7
             _active = false;
-         CloseSessionWriters();
+            CloseSessionWriters();
         }
 
         private static bool AllStrictlyPositive(params double[] vals) => vals.All(v => v > 0.0);
@@ -154,7 +151,6 @@ namespace Service
             _rejectsFs = null;
         }
 
-    
         private bool _disposed;
         public void Dispose()
         {
