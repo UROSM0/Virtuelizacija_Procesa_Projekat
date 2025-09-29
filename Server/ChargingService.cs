@@ -1,16 +1,16 @@
 ﻿using Common;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.ServiceModel;
-using System.Collections.Generic;
 
 namespace Service
 {
     [ServiceBehavior(InstanceContextMode = InstanceContextMode.Single)]
     public class ChargingService : IChargingService, IDisposable
     {
-        // --- Session state ---
+
         private bool _active;
         private string _vehicleId;
 
@@ -27,32 +27,39 @@ namespace Service
         private FileStream _rejectsFs;
         private StreamWriter _rejectsWriter;
 
-        // --- Events (iz tačke 8) ---
+
         public event EventHandler<TransferStartedEventArgs> OnTransferStarted;
         public event EventHandler<SampleReceivedEventArgs> OnSampleReceived;
         public event EventHandler<TransferCompletedEventArgs> OnTransferCompleted;
         public event EventHandler<WarningEventArgs> OnWarningRaised;
 
+
+        public event EventHandler<FrequencyDeviationEventArgs> OnFrequencyDeviation;
+        public event EventHandler<FrequencySpikeEventArgs> OnFrequencySpike;
+
         private int _acceptedCount;
         private int _rejectedCount;
 
-        // --- Analytics #9 i #10 state ---
-        // #9: energija (kumulativ preko RealPowerAvg) + praćenje stagnacije
-        private double _cumEnergyKWh;           // vrlo uprošćena numerička integracija (pretpostavka: Δt ~ 1 min između uzoraka -> /60)
-        private int _energyStallCounter;        // broj uzastopnih redova sa "zanemarljivim" rastom
-        private const int EnergyStallRows = 10; // prag za podizanje EnergyStallWarning
-        private const double EnergyMinStep = 1e-6;
 
-        private const double OverloadKwThreshold = 6.0; // prag za OverloadWarning (kW)
+        private bool _hasPrevTs;
+        private DateTime _prevTsUtc;
+        private double _cumulativeEnergyKWh;
 
-        // #10: frekvencija i stabilnost
-        private const double NominalFreq = 50.0;     // Hz
-        private const double FreqAvgTolerance = 0.5; // ±0.5 Hz okno oko nominale
-        private const double SpikeThresholdHz = 0.8; // prag naglog skoka između uzastopnih redova
+        
+        private int _stallNoGrowthCount;
+        private const int StallConsecutiveNoGrowthLimit = 10;
 
-        private double? _lastFreqMin;
-        private double? _lastFreqAvg;
-        private double? _lastFreqMax;
+        
+        private const double OverloadThresholdKW = 6.0; 
+
+        
+        private const double NominalHz = 50.0;
+        private const double DeviationLimitHz = 0.5;     
+        private const double SpikeThresholdHz = 0.20;    
+
+        private bool _hasPrevFreq;
+        private double _prevFmin;
+        private double _prevFmax;
 
         public void StartSession(string vehicleId)
         {
@@ -67,13 +74,14 @@ namespace Service
             _acceptedCount = 0;
             _rejectedCount = 0;
 
-            // reset analytics
-            _cumEnergyKWh = 0.0;
-            _energyStallCounter = 0;
+            
+            _hasPrevTs = false;
+            _cumulativeEnergyKWh = 0.0;
+            _stallNoGrowthCount = 0;
 
-            _lastFreqMin = null;
-            _lastFreqAvg = null;
-            _lastFreqMax = null;
+            _hasPrevFreq = false;
+            _prevFmin = 0.0;
+            _prevFmax = 0.0;
 
             var date = DateTime.UtcNow.ToString("yyyy-MM-dd");
             _sessionDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", _vehicleId, date);
@@ -94,7 +102,7 @@ namespace Service
                     "ReacMin,ReacAvg,ReacMax," +
                     "AppMin,AppAvg,AppMax," +
                     "FreqMin,FreqAvg,FreqMax," +
-                    "VehicleId");
+                    "VehicleId,E_kWh");
             }
 
             bool newRejects = !File.Exists(_rejectsCsvPath);
@@ -114,11 +122,11 @@ namespace Service
         {
             EnsureActive();
 
-            // idempotentnost po RowIndex
+            
             if (s != null && s.RowIndex > 0 && _acceptedRows.Contains(s.RowIndex))
                 return;
 
-            // validacije osnovnih opsega
+            
             if (s == null) Reject("Sample is null.", null);
             if (s.Timestamp == default) Reject("Invalid Timestamp.", s.RowIndex);
 
@@ -131,62 +139,99 @@ namespace Service
             if (!AllStrictlyPositive(s.FrequencyMin, s.FrequencyAvg, s.FrequencyMax))
                 Reject("Frequency must be > 0.", s.RowIndex);
 
-            // --- Analytics #9: energija i overload ---
-            // aproksimacija energije: power_avg (kW) * (1 min) = kWh/60
-            double deltaKWh = s.RealPowerAvg / 60.0;
-            double before = _cumEnergyKWh;
-            _cumEnergyKWh += Math.Max(0.0, deltaKWh); // ne dozvoljavamo negativan doprinos
 
-            if ((_cumEnergyKWh - before) < EnergyMinStep)
-                _energyStallCounter++;
+            double dtHours;
+            if (_hasPrevTs)
+            {
+                dtHours = (s.Timestamp.ToUniversalTime() - _prevTsUtc).TotalHours;
+                if (dtHours <= 0) dtHours = 1.0 / 60.0; 
+            }
             else
-                _energyStallCounter = 0;
-
-            if (_energyStallCounter >= EnergyStallRows)
             {
-                RaiseWarning($"EnergyStallWarning: rast energije zanemarljiv {_energyStallCounter} uzastopnih redova.", s.RowIndex);
-                _energyStallCounter = 0; // reset posle upozorenja
+                dtHours = 0.0;
+                _hasPrevTs = true;
             }
 
-            if (s.RealPowerMax > OverloadKwThreshold)
+            
+            double dE = s.RealPowerAvg * dtHours; 
+            if (dE < 0) dE = 0;                   
+            _cumulativeEnergyKWh += dE;
+
+            
+            if (dE <= 0.0)
+            {
+                _stallNoGrowthCount++;
+                if (_stallNoGrowthCount > StallConsecutiveNoGrowthLimit)
+                {
+                    RaiseWarning(
+                        $"EnergyStallWarning: cumulative E stagnira > {StallConsecutiveNoGrowthLimit} redova.",
+                        s.RowIndex);
+                    _stallNoGrowthCount = 0; 
+                }
+            }
+            else
+            {
+                _stallNoGrowthCount = 0;
+            }
+
+            
+            if (s.RealPowerMax > OverloadThresholdKW)
             {
                 RaiseWarning(
-                    $"OverloadWarning: RealPowerMax={s.RealPowerMax:F3} kW > {OverloadKwThreshold} kW",
+                    $"OverloadWarning: RealPowerMax={s.RealPowerMax:F3} kW > {OverloadThresholdKW} kW",
                     s.RowIndex);
             }
 
-            // --- Analytics #10: frekvencija i stabilnost ---
-            // 1) Odstupanje prosečne frekvencije od nominale
-            double dev = Math.Abs(s.FrequencyAvg - NominalFreq);
-            if (dev > FreqAvgTolerance)
+
+            double dev = Math.Abs(s.FrequencyAvg - NominalHz);
+            if (dev > DeviationLimitHz)
             {
+                
+                OnFrequencyDeviation?.Invoke(this, new FrequencyDeviationEventArgs
+                {
+                    VehicleId = _vehicleId,
+                    RowIndex = s.RowIndex,
+                    FrequencyAvg = s.FrequencyAvg,
+                    DeviationHz = dev,
+                    LimitHz = DeviationLimitHz,
+                    UtcRaised = DateTime.UtcNow
+                });
+
+                
                 RaiseWarning(
-                    $"FrequencyDeviationWarning: Avg={s.FrequencyAvg:F3} Hz (dev={dev:F3} Hz) izvan ±{FreqAvgTolerance} Hz oko {NominalFreq} Hz",
+                    $"FrequencyDeviationWarning: f_avg={s.FrequencyAvg:F3} Hz, dev={dev:F3} Hz > {DeviationLimitHz:F3} Hz",
                     s.RowIndex);
             }
 
-            // 2) Spike detekcija: nagli skokovi Min/Max (i opciono Avg) između uzastopnih redova
-            if (_lastFreqMin.HasValue || _lastFreqMax.HasValue || _lastFreqAvg.HasValue)
+            
+            if (_hasPrevFreq)
             {
-                double dfMin = _lastFreqMin.HasValue ? Math.Abs(s.FrequencyMin - _lastFreqMin.Value) : 0.0;
-                double dfMax = _lastFreqMax.HasValue ? Math.Abs(s.FrequencyMax - _lastFreqMax.Value) : 0.0;
-                double dfAvg = _lastFreqAvg.HasValue ? Math.Abs(s.FrequencyAvg - _lastFreqAvg.Value) : 0.0;
-
+                double dfMin = Math.Abs(s.FrequencyMin - _prevFmin);
+                double dfMax = Math.Abs(s.FrequencyMax - _prevFmax);
                 if (dfMin > SpikeThresholdHz || dfMax > SpikeThresholdHz)
                 {
-                    // Spec traži "FrequencySpike događaj" – koristimo centralizovani OnWarningRaised,
-                    // ali sa jasnim reason prefiksom da se razlikuje u logu/GUI-ju.
+                    OnFrequencySpike?.Invoke(this, new FrequencySpikeEventArgs
+                    {
+                        VehicleId = _vehicleId,
+                        RowIndex = s.RowIndex,
+                        DeltaMinHz = dfMin,
+                        DeltaMaxHz = dfMax,
+                        ThresholdHz = SpikeThresholdHz,
+                        UtcRaised = DateTime.UtcNow
+                    });
+
                     RaiseWarning(
-                        $"FrequencySpike: Δf_min={dfMin:F3} Hz, Δf_max={dfMax:F3} Hz (prag={SpikeThresholdHz:F3} Hz)",
+                        $"FrequencySpikeWarning: Δf_min={dfMin:F3} Hz, Δf_max={dfMax:F3} Hz (prag={SpikeThresholdHz:F3} Hz)",
                         s.RowIndex);
                 }
-                // Ako želiš i AVG spike, otkomentariši sledeće:
-                // else if (dfAvg > SpikeThresholdHz) {
-                //     RaiseWarning($"FrequencySpike(Avg): Δf_avg={dfAvg:F3} Hz (prag={SpikeThresholdHz:F3} Hz)", s.RowIndex);
-                // }
             }
+            _prevFmin = s.FrequencyMin;
+            _prevFmax = s.FrequencyMax;
+            _hasPrevFreq = true;
 
-            // upiši red
+            
+            _prevTsUtc = s.Timestamp.ToUniversalTime();
+
             string line = string.Join(",",
                 s.RowIndex,
                 s.Timestamp.ToString("o"),
@@ -196,18 +241,14 @@ namespace Service
                 s.ReactivePowerMin, s.ReactivePowerAvg, s.ReactivePowerMax,
                 s.ApparentPowerMin, s.ApparentPowerAvg, s.ApparentPowerMax,
                 s.FrequencyMin, s.FrequencyAvg, s.FrequencyMax,
-                _vehicleId
+                _vehicleId,
+                _cumulativeEnergyKWh.ToString(System.Globalization.CultureInfo.InvariantCulture)
             );
 
             _sessionWriter.WriteLine(line);
             _acceptedRows.Add(s.RowIndex);
             _acceptedCount++;
             RaiseSampleReceived(s.RowIndex, s.Timestamp);
-
-            // update "last" za #10
-            _lastFreqMin = s.FrequencyMin;
-            _lastFreqAvg = s.FrequencyAvg;
-            _lastFreqMax = s.FrequencyMax;
 
             if (s.RowIndex % 100 == 0)
                 Console.WriteLine($"[SERVER] primljeno {s.RowIndex} redova...");
@@ -227,7 +268,7 @@ namespace Service
             CloseSessionWriters();
         }
 
-        // --- helpers ---
+       
         private static bool AllStrictlyPositive(params double[] vals) => vals.All(v => v > 0.0);
         private static bool AllNonNegative(params double[] vals) => vals.All(v => v >= 0.0);
 
@@ -267,7 +308,7 @@ namespace Service
             _rejectsFs = null;
         }
 
-        // --- event raisers ---
+       
         private void RaiseTransferStarted()
             => OnTransferStarted?.Invoke(this, new TransferStartedEventArgs
             {
@@ -301,7 +342,7 @@ namespace Service
                 UtcRaised = DateTime.UtcNow
             });
 
-        // --- IDisposable ---
+        
         private bool _disposed;
         public void Dispose()
         {

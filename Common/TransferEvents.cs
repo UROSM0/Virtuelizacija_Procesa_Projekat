@@ -65,4 +65,24 @@ namespace Common
             UtcRaised = utcRaised;
         }
     }
+
+    public class FrequencyDeviationEventArgs : EventArgs
+    {
+        public string VehicleId { get; set; }
+        public int? RowIndex { get; set; }
+        public double FrequencyAvg { get; set; }
+        public double DeviationHz { get; set; }   
+        public double LimitHz { get; set; }      
+        public DateTime UtcRaised { get; set; }
+    }
+
+    public class FrequencySpikeEventArgs : EventArgs
+    {
+        public string VehicleId { get; set; }
+        public int? RowIndex { get; set; }
+        public double DeltaMinHz { get; set; }    
+        public double DeltaMaxHz { get; set; }    
+        public double ThresholdHz { get; set; }
+        public DateTime UtcRaised { get; set; }
+    }
 }

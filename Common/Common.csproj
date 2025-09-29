@@ -44,7 +44,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ChargingSample.cs" />
-    <Compile Include="Class1.cs" />
     <Compile Include="FaultInfo.cs" />
     <Compile Include="IChargingService.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
