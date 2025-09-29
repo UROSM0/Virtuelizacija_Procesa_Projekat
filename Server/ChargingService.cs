@@ -10,26 +10,24 @@ namespace Service
     [ServiceBehavior(InstanceContextMode = InstanceContextMode.Single)]
     public class ChargingService : IChargingService, IDisposable
     {
-        
+        // --- STATUS / I/O ---
         private bool _active;
         private string _vehicleId;
-
 
         private readonly HashSet<int> _acceptedRows = new HashSet<int>();
         private readonly HashSet<int> _rejectedRows = new HashSet<int>();
 
-       
         private string _sessionDir;
         private string _sessionCsvPath;
         private string _rejectsCsvPath;
 
-        
         private FileStream _sessionFs;
         private StreamWriter _sessionWriter;
 
         private FileStream _rejectsFs;
         private StreamWriter _rejectsWriter;
 
+        // --- DOGAĐAJI ---
         public event EventHandler<TransferStartedEventArgs> OnTransferStarted;
         public event EventHandler<SampleReceivedEventArgs> OnSampleReceived;
         public event EventHandler<TransferCompletedEventArgs> OnTransferCompleted;
@@ -37,6 +35,18 @@ namespace Service
 
         private int _acceptedCount;
         private int _rejectedCount;
+
+        // --- ANALITIKA (#9) ---
+        // energija = ∫ P_avg dt  (pretpostavka: RealPowerAvg je u kW, dt u h => kWh)
+        private DateTime? _lastTsUtc;
+        private double _cumEnergyKWh;
+        private int _stallCount;
+        private bool _stallRaisedOnce;
+
+        // Pragovi (promeni po želji)
+        private const double OVERLOAD_THRESHOLD_KW = 6.0;     // RealPowerMax > 6 kW => OverloadWarning
+        private const int STALL_THRESHOLD_ROWS = 10;      // >10 uzastopnih "nema rasta" => EnergyStallWarning
+        private const double MIN_DE_KWH = 1e-4;    // 0.0001 kWh po koraku se smatra ~0
 
         public void StartSession(string vehicleId)
         {
@@ -50,6 +60,12 @@ namespace Service
             _rejectedRows.Clear();
             _acceptedCount = 0;
             _rejectedCount = 0;
+
+            // reset analitike
+            _lastTsUtc = null;
+            _cumEnergyKWh = 0.0;
+            _stallCount = 0;
+            _stallRaisedOnce = false;
 
             var date = DateTime.UtcNow.ToString("yyyy-MM-dd");
             _sessionDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", _vehicleId, date);
@@ -82,19 +98,19 @@ namespace Service
             }
 
             Console.WriteLine($"[SERVER] StartSession: {_vehicleId}");
-            Console.WriteLine("[SERVER] Status: prenos u toku..."); 
-            RaiseTransferStarted();                                  
+            Console.WriteLine("[SERVER] Status: prenos u toku...");
+            RaiseTransferStarted();
         }
 
         public void PushSample(ChargingSample s)
         {
             EnsureActive();
 
-            
+            // deduplikacija po rednom broju (ako klijent retry-uje isti red)
             if (s != null && s.RowIndex > 0 && _acceptedRows.Contains(s.RowIndex))
                 return;
 
-           
+            // --- VALIDACIJA (#3) ---
             if (s == null) Reject("Sample is null.", null);
             if (s.Timestamp == default) Reject("Invalid Timestamp.", s.RowIndex);
 
@@ -107,7 +123,49 @@ namespace Service
             if (!AllStrictlyPositive(s.FrequencyMin, s.FrequencyAvg, s.FrequencyMax))
                 Reject("Frequency must be > 0.", s.RowIndex);
 
-           
+            // --- ANALITIKA (#9) ---
+
+            // OverloadWarning: RealPowerMax > prag
+            if (s.RealPowerMax > OVERLOAD_THRESHOLD_KW)
+            {
+                RaiseWarning($"OverloadWarning: RealPowerMax={s.RealPowerMax} kW > {OVERLOAD_THRESHOLD_KW} kW", s.RowIndex);
+            }
+
+            // Energija: RealPowerAvg (kW) * dt (h) => kWh
+            var tsUtc = s.Timestamp.Kind == DateTimeKind.Utc ? s.Timestamp : s.Timestamp.ToUniversalTime();
+            if (_lastTsUtc.HasValue)
+            {
+                var dtHours = (tsUtc - _lastTsUtc.Value).TotalHours;
+
+                if (dtHours < 0)
+                {
+                    // nazad u vremenu – upozorenje, ali dozvoli red
+                    RaiseWarning($"Timestamp out of order (dt={dtHours:F6} h).", s.RowIndex);
+                }
+                else
+                {
+                    double dE = s.RealPowerAvg * dtHours; // kWh
+                    if (dE < MIN_DE_KWH)
+                    {
+                        _stallCount++;
+                        if (!_stallRaisedOnce && _stallCount > STALL_THRESHOLD_ROWS)
+                        {
+                            _stallRaisedOnce = true;
+                            RaiseWarning(
+                                $"EnergyStallWarning: energy growth < {MIN_DE_KWH} kWh for {_stallCount} consecutive samples.",
+                                s.RowIndex);
+                        }
+                    }
+                    else
+                    {
+                        _stallCount = 0;
+                        _cumEnergyKWh += dE;
+                    }
+                }
+            }
+            _lastTsUtc = tsUtc;
+
+            // --- SNIMANJE VAŽEĆEG REDA ---
             string line = string.Join(",",
                 s.RowIndex,
                 s.Timestamp.ToString("o"),
@@ -122,10 +180,11 @@ namespace Service
 
             _sessionWriter.WriteLine(line);
             _acceptedRows.Add(s.RowIndex);
-            _acceptedCount++;                                   
-            RaiseSampleReceived(s.RowIndex, s.Timestamp);       
+            _acceptedCount++;
 
-            if (s.RowIndex % 100 == 0)                         
+            RaiseSampleReceived(s.RowIndex, s.Timestamp);
+
+            if (s.RowIndex % 100 == 0)
                 Console.WriteLine($"[SERVER] primljeno {s.RowIndex} redova...");
         }
 
@@ -136,15 +195,14 @@ namespace Service
                 throw Fault("VehicleId mismatch.");
 
             Console.WriteLine($"[SERVER] EndSession: {vehicleId}");
-            Console.WriteLine("[SERVER] Status: prenos završen."); 
-            RaiseTransferCompleted();                              
+            Console.WriteLine("[SERVER] Status: prenos završen.");
+            RaiseTransferCompleted();
 
             _active = false;
             CloseSessionWriters();
         }
 
-        // --- helpers ---
-
+        // --- VALIDACIJA / FAULT / REJECT ---
         private static bool AllStrictlyPositive(params double[] vals) => vals.All(v => v > 0.0);
         private static bool AllNonNegative(params double[] vals) => vals.All(v => v >= 0.0);
 
@@ -158,15 +216,16 @@ namespace Service
             if (rowIndex.HasValue && _rejectedRows.Add(rowIndex.Value))
             {
                 _rejectsWriter?.WriteLine($"{rowIndex},{reason},{_vehicleId}");
-                _rejectedCount++;                                 
+                _rejectedCount++;
             }
-            RaiseWarning(reason, rowIndex);                        
-            throw Fault(reason, rowIndex);                         
+            RaiseWarning(reason, rowIndex);            // vidljivo u logu/GUI (#8)
+            throw Fault(reason, rowIndex);             // fault ka klijentu (#3)
         }
 
         private FaultException<FaultInfo> Fault(string reason, int? rowIndex = null)
             => new FaultException<FaultInfo>(new FaultInfo(reason, rowIndex, _vehicleId), reason);
 
+        // --- I/O zatvaranje ---
         private void CloseSessionWriters()
         {
             try { _sessionWriter?.Flush(); } catch { }
@@ -184,7 +243,7 @@ namespace Service
             _rejectsFs = null;
         }
 
-       
+        // --- Event helper-i ---
         private void RaiseTransferStarted()
             => OnTransferStarted?.Invoke(this, new TransferStartedEventArgs
             {
@@ -218,7 +277,7 @@ namespace Service
                 UtcRaised = DateTime.UtcNow
             });
 
-        
+        // --- Dispose ---
         private bool _disposed;
         public void Dispose()
         {
